@@ -3,28 +3,58 @@ use std::thread;
 
 struct Worker {
     id: usize,
-    thread: thread::JoinHandle<()>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
-    fn new(id: usize, reciever: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
+    fn new(id: usize, reciever: Arc<Mutex<mpsc::Receiver<Message>>>) -> Worker {
         let thread = thread::spawn(move || loop {
-            let job = reciever.lock().unwrap().recv().unwrap();
-            println!("worker(id:{}) got a job; executing:", id);
-            job();
+            let message = reciever.lock().unwrap().recv().unwrap();
+            match message {
+                Message::NewJob(job) => {
+                    println!("worker(id:{}) got a job; executing:", id);
+                    job();
+                }
+                Message::Terminate => {
+                    println!(
+                        "Worker(id:{}) got terminating signal. Closing worker....",
+                        id
+                    );
+                    break;
+                }
+            }
         });
-        Worker { id, thread }
+        Worker {
+            id,
+            thread: Some(thread),
+        }
     }
-}
-
-pub struct ThreadPool {
-    workers: Vec<Worker>,
-    sender: mpsc::Sender<Job>,
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 pub type ThreadPoolError = String;
+
+pub struct ThreadPool {
+    workers: Vec<Worker>,
+    sender: mpsc::Sender<Message>,
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        println!("sending terminating signal to all active worker...");
+        for _ in &self.workers {
+            self.sender.send(Message::Terminate).unwrap();
+        }
+        for worker in &mut self.workers {
+            println!("Shutting down worker: {}", worker.id);
+
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+}
 
 impl ThreadPool {
     /// Create a new ThreadPool.
@@ -54,6 +84,11 @@ impl ThreadPool {
         F: FnOnce() + Send + 'static,
     {
         let job = Box::new(f);
-        self.sender.send(job).unwrap();
+        self.sender.send(Message::NewJob(job)).unwrap();
     }
+}
+
+enum Message {
+    NewJob(Job),
+    Terminate,
 }
